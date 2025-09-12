@@ -15,6 +15,8 @@ from typing import List, Optional, Tuple
 import warnings
 import os
 import pickle
+import json
+from datetime import datetime
 from torchtune.modules import RotaryPositionalEmbeddings
 warnings.filterwarnings('ignore')
 
@@ -762,11 +764,41 @@ def train_moe_model(config: MoEModelConfig, train_loader: DataLoader, val_loader
 
     return model, final_eval
 
+def save_experiment_results(results: dict, filename: str = None):
+    """Save experiment results to JSON file"""
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"ns_ablation_results_{timestamp}.json"
+    
+    # Create results directory if it doesn't exist
+    os.makedirs("experiment_results", exist_ok=True)
+    filepath = os.path.join("experiment_results", filename)
+    
+    # Add metadata
+    results_with_meta = {
+        'timestamp': datetime.now().isoformat(),
+        'total_experiments': len(results),
+        'successful_experiments': sum(1 for r in results.values() if r['status'] == 'success'),
+        'failed_experiments': sum(1 for r in results.values() if r['status'] == 'failed'),
+        'results': results
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(results_with_meta, f, indent=2)
+    
+    print(f"💾 Results saved to: {filepath}")
+    return filepath
+
 def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader, val_loader: DataLoader):
     """Run ablation experiments with different Newton-Schulz formula variations"""
     print("="*80)
     print("🧪 NEWTON-SCHULZ FORMULA ABLATION EXPERIMENTS")
     print("="*80)
+    
+    # Initialize logging
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"ns_ablation_results_{timestamp}.json"
+    print(f"📝 Results will be logged to: experiment_results/{log_filename}")
 
     # Define experiments to run
     experiments = [
@@ -784,8 +816,32 @@ def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader
     ]
 
     results = {}
-    experiment_config = config.__dict__.copy()
-    experiment_config['max_steps'] = 500  # Override for ablation experiments
+    
+    # Create experiment config without computed fields
+    experiment_config = {
+        'd_model': config.d_model,
+        'n_heads': config.n_heads,
+        'n_layers': config.n_layers,
+        'd_ff': config.d_ff,
+        'batch_size': config.batch_size,
+        'max_steps': 500,  # Override for ablation experiments
+        'gradient_accumulation_steps': config.gradient_accumulation_steps,
+        'muon_lr': config.muon_lr,
+        'max_seq_len': config.max_seq_len,
+        'num_documents': config.num_documents,
+        'max_tokens': config.max_tokens,
+        'eval_every': config.eval_every,
+        'eval_steps': config.eval_steps,
+        'weight_decay': config.weight_decay,
+        'dropout': config.dropout,
+        'grad_clip': config.grad_clip,
+        'use_amp': config.use_amp,
+        'vocab_size': config.vocab_size,
+        'log_milestones': config.log_milestones,
+        'num_experts': config.num_experts,
+        'expert_top_k': config.expert_top_k,
+        'load_balancing_weight': config.load_balancing_weight,
+    }
 
     for ns_variant, exp_name, description in experiments:
         print(f"\n{'='*60}")
@@ -818,6 +874,7 @@ def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader
             print(f"📉 Final loss: {final_metrics['val_loss']:.4f}")
             print(f"🎯 Final accuracy: {final_metrics['val_accuracy']:.4f}")
             print(f"🔮 Final perplexity: {final_metrics['val_perplexity']:.2f}")
+            
         except Exception as e:
             print(f"❌ Experiment {exp_name} failed: {str(e)}")
             results[exp_name] = {
@@ -826,9 +883,21 @@ def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader
                 'status': 'failed',
                 'error': str(e)
             }
+        
+        # Save results after each experiment (in case of crashes)
+        save_experiment_results(results, log_filename)
+        print(f"💾 Progress saved ({len(results)}/{len(experiments)} experiments complete)")
+        
+        # Add a small delay between experiments to prevent overheating
+        time.sleep(2)
 
     # Print summary comparison
     print_summary_results(results)
+    
+    # Final save with complete results
+    final_filepath = save_experiment_results(results, log_filename)
+    print(f"✅ All experiments complete! Final results saved to: {final_filepath}")
+    
     return results
 
 def print_summary_results(results):
