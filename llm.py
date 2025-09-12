@@ -824,7 +824,7 @@ def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader
         'n_layers': config.n_layers,
         'd_ff': config.d_ff,
         'batch_size': config.batch_size,
-        'max_steps': 500,  # Override for ablation experiments
+        'max_steps': ,  # Override for ablation experiments
         'gradient_accumulation_steps': config.gradient_accumulation_steps,
         'muon_lr': config.muon_lr,
         'max_seq_len': config.max_seq_len,
