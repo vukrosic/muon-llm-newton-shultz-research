@@ -814,7 +814,10 @@ def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader
                 'status': 'success'
             }
 
-            print(".2f"            print(".4f"            print(".4f"            print(".2f"
+            print(f"⏱️ Training time: {end_time - start_time:.2f} seconds")
+            print(f"📉 Final loss: {final_metrics['val_loss']:.4f}")
+            print(f"🎯 Final accuracy: {final_metrics['val_accuracy']:.4f}")
+            print(f"🔮 Final perplexity: {final_metrics['val_perplexity']:.2f}")
         except Exception as e:
             print(f"❌ Experiment {exp_name} failed: {str(e)}")
             results[exp_name] = {
