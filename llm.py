@@ -880,7 +880,7 @@ def print_summary_results(results):
                 improvement = baseline_loss - data['final_loss']
                 pct_change = (improvement / baseline_loss) * 100
                 symbol = "📈" if pct_change > 0 else "📉"
-                print(".4f"
+                print(f"  • {exp_name}: {improvement:+.4f} loss ({pct_change:+.2f}% change) {symbol}")
     # Failed experiments
     failed_experiments = {k: v for k, v in results.items() if v['status'] == 'failed'}
     if failed_experiments:
