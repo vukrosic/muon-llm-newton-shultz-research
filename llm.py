@@ -71,10 +71,9 @@ class MoEModelConfig:
         assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
 
 @torch.compile
-def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, variant: str = "original") -> torch.Tensor:
     """Newton-Schulz iteration to compute the zeroth power / orthogonalization of G."""
     assert G.ndim >= 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
 
     if G.size(-2) > G.size(-1):
@@ -82,10 +81,93 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor
 
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
 
-    for _ in range(steps):
-        A = X @ X.mT
-        B = b * A + c * A @ A
-        X = a * X + B @ X
+    # Different Newton-Schulz formula variations
+    if variant == "original":
+        # Original coefficients from the paper
+        a, b, c = (3.4445, -4.7750, 2.0315)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant1_alternate_coeffs":
+        # Experiment 1: Different coefficients
+        a, b, c = (2.5, -3.0, 1.8)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant2_simple_coeffs":
+        # Experiment 2: Simpler coefficients
+        a, b, c = (3.0, -4.0, 2.0)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant3_reordered":
+        # Experiment 3: Reordered terms
+        a, b, c = (3.4445, -4.7750, 2.0315)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = c * A @ A + b * A  # Reordered
+            X = B @ X + a * X       # Reordered
+
+    elif variant == "variant4_no_cubic":
+        # Experiment 4: Remove cubic term (A @ A)
+        a, b = (3.4445, -4.7750)
+        for _ in range(steps):
+            A = X @ X.mT
+            X = a * X + b * A @ X
+
+    elif variant == "variant5_no_quadratic":
+        # Experiment 5: Remove quadratic term (A)
+        a, c = (3.4445, 2.0315)
+        for _ in range(steps):
+            A = X @ X.mT
+            B = c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant6_only_linear":
+        # Experiment 6: Only linear term
+        a = 3.4445
+        for _ in range(steps):
+            X = a * X
+
+    elif variant == "variant7_different_structure":
+        # Experiment 7: Different algebraic structure
+        a, b, c, d = (2.8, -3.5, 1.9, 0.5)
+        for _ in range(steps):
+            A = X @ X.mT
+            X = a * X + b * A @ X + c * (A @ A) @ X + d * X
+
+    elif variant == "variant8_fewer_iterations":
+        # Experiment 8: Same coefficients, fewer iterations
+        a, b, c = (3.4445, -4.7750, 2.0315)
+        for _ in range(min(steps, 3)):  # Cap at 3 iterations
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant9_more_iterations":
+        # Experiment 9: Same coefficients, more iterations
+        a, b, c = (3.4445, -4.7750, 2.0315)
+        for _ in range(min(steps, 8)):  # Cap at 8 iterations
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+
+    elif variant == "variant10_adaptive_coeffs":
+        # Experiment 10: Adaptive coefficients based on matrix properties
+        for _ in range(steps):
+            A = X @ X.mT
+            norm_A = torch.norm(A)
+            a = 3.0 + 0.4 * torch.sigmoid(norm_A - 2.0)
+            b = -4.0 - 0.7 * torch.sigmoid(norm_A - 1.5)
+            c = 2.0 + 0.03 * torch.sigmoid(norm_A - 3.0)
+            B = b * A + c * A @ A
+            X = a * X + B @ X
 
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -94,8 +176,8 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor
 
 class Muon(torch.optim.Optimizer):
     """Muon - MomentUm Orthogonalized by Newton-schulz"""
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, ns_variant="original"):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, ns_variant=ns_variant)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -114,7 +196,7 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - group["momentum"])
                 g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+                g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"], variant=group["ns_variant"])
                 p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
 	
 def load_and_cache_data(config: MoEModelConfig, cache_dir: str = "data_cache"):
@@ -516,15 +598,15 @@ def evaluate_model(model: nn.Module, val_loader: DataLoader, config: MoEModelCon
     model.train()
     return {'val_loss': avg_loss, 'val_accuracy': accuracy, 'val_perplexity': perplexity}
 
-def setup_muon_optimizer(model: nn.Module, config: MoEModelConfig):
+def setup_muon_optimizer(model: nn.Module, config: MoEModelConfig, ns_variant: str = "original"):
     """Setup Muon optimizer with hybrid approach"""
     muon_params = []
     adamw_params = []
 
     for name, param in model.named_parameters():
-        if (param.ndim == 2 and 
-            'token_embedding' not in name and 
-            'norm' not in name and 
+        if (param.ndim == 2 and
+            'token_embedding' not in name and
+            'norm' not in name and
             param.requires_grad):
             muon_params.append(param)
         else:
@@ -533,15 +615,17 @@ def setup_muon_optimizer(model: nn.Module, config: MoEModelConfig):
     print(f"  Muon parameters: {sum(p.numel() for p in muon_params):,}")
     print(f"  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
 
-    muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=0.95)
+    muon_optimizer = Muon(muon_params, lr=config.muon_lr, momentum=0.95, ns_variant=ns_variant)
     adamw_optimizer = torch.optim.AdamW(adamw_params, lr=config.muon_lr*0.1, weight_decay=config.weight_decay)
 
     return [muon_optimizer, adamw_optimizer]
 
 
-def train_moe_model(config: MoEModelConfig, train_loader: DataLoader, val_loader: DataLoader):
+def train_moe_model(config: MoEModelConfig, train_loader: DataLoader, val_loader: DataLoader, ns_variant: str = "original", experiment_name: str = "baseline"):
     """Train the MoE model"""
     print(f"\n🚀 Training MoE model with {config.num_experts} experts (top-{config.expert_top_k})")
+    print(f"🔬 NS Variant: {ns_variant}")
+    print(f"🧪 Experiment: {experiment_name}")
 
     # Initialize model
     set_seed(42)
@@ -561,7 +645,7 @@ def train_moe_model(config: MoEModelConfig, train_loader: DataLoader, val_loader
     print(f"  📊 Parameter efficiency: {active_params/total_params:.1%} active per forward pass")
 
     # Setup optimizers
-    optimizers = setup_muon_optimizer(model, config)
+    optimizers = setup_muon_optimizer(model, config, ns_variant)
 
     # Learning rate schedule
     schedulers = []
@@ -678,6 +762,129 @@ def train_moe_model(config: MoEModelConfig, train_loader: DataLoader, val_loader
 
     return model, final_eval
 
+def run_ns_ablation_experiments(config: MoEModelConfig, train_loader: DataLoader, val_loader: DataLoader):
+    """Run ablation experiments with different Newton-Schulz formula variations"""
+    print("="*80)
+    print("🧪 NEWTON-SCHULZ FORMULA ABLATION EXPERIMENTS")
+    print("="*80)
+
+    # Define experiments to run
+    experiments = [
+        ("original", "baseline", "Original NS coefficients (3.4445, -4.7750, 2.0315)"),
+        ("variant1_alternate_coeffs", "alt-coeffs", "Alternative coefficients (2.5, -3.0, 1.8)"),
+        ("variant2_simple_coeffs", "simple-coeffs", "Simple coefficients (3.0, -4.0, 2.0)"),
+        ("variant3_reordered", "reordered", "Same coeffs, reordered terms"),
+        ("variant4_no_cubic", "no-cubic", "Remove cubic term (A @ A)"),
+        ("variant5_no_quadratic", "no-quadratic", "Remove quadratic term (A)"),
+        ("variant6_only_linear", "only-linear", "Only linear term (a * X)"),
+        ("variant7_different_structure", "diff-structure", "Different algebraic structure"),
+        ("variant8_fewer_iterations", "fewer-iter", "Same coeffs, max 3 iterations"),
+        ("variant9_more_iterations", "more-iter", "Same coeffs, max 8 iterations"),
+        ("variant10_adaptive_coeffs", "adaptive", "Adaptive coefficients based on matrix norm"),
+    ]
+
+    results = {}
+    experiment_config = config.__dict__.copy()
+    experiment_config['max_steps'] = 500  # Override for ablation experiments
+
+    for ns_variant, exp_name, description in experiments:
+        print(f"\n{'='*60}")
+        print(f"🔬 Experiment: {exp_name}")
+        print(f"📝 Description: {description}")
+        print(f"{'='*60}")
+
+        try:
+            start_time = time.time()
+            model, final_metrics = train_moe_model(
+                MoEModelConfig(**experiment_config),
+                train_loader,
+                val_loader,
+                ns_variant=ns_variant,
+                experiment_name=exp_name
+            )
+            end_time = time.time()
+
+            results[exp_name] = {
+                'variant': ns_variant,
+                'description': description,
+                'training_time': end_time - start_time,
+                'final_loss': final_metrics['val_loss'],
+                'final_accuracy': final_metrics['val_accuracy'],
+                'final_perplexity': final_metrics['val_perplexity'],
+                'status': 'success'
+            }
+
+            print(".2f"            print(".4f"            print(".4f"            print(".2f"
+        except Exception as e:
+            print(f"❌ Experiment {exp_name} failed: {str(e)}")
+            results[exp_name] = {
+                'variant': ns_variant,
+                'description': description,
+                'status': 'failed',
+                'error': str(e)
+            }
+
+    # Print summary comparison
+    print_summary_results(results)
+    return results
+
+def print_summary_results(results):
+    """Print a summary comparison of all experimental results"""
+    print("\n" + "="*100)
+    print("📊 EXPERIMENT RESULTS SUMMARY")
+    print("="*100)
+
+    # Filter successful experiments
+    successful_experiments = {k: v for k, v in results.items() if v['status'] == 'success'}
+
+    if not successful_experiments:
+        print("❌ No successful experiments to summarize")
+        return
+
+    # Sort by final validation loss
+    sorted_experiments = sorted(successful_experiments.items(),
+                               key=lambda x: x[1]['final_loss'])
+
+    print("<20")
+    print("-" * 100)
+
+    for exp_name, data in sorted_experiments:
+        print("<20"
+              "<10.4f"
+              "<10.4f"
+              "<8.1f")
+
+    print("-" * 100)
+
+    # Find best and worst performers
+    best_exp = sorted_experiments[0]
+    worst_exp = sorted_experiments[-1]
+
+    print(f"🏆 Best Performance: {best_exp[0]} (Loss: {best_exp[1]['final_loss']:.4f})")
+    print(f"📉 Worst Performance: {worst_exp[0]} (Loss: {worst_exp[1]['final_loss']:.4f})")
+
+    # Calculate improvements
+    baseline_loss = None
+    for exp_name, data in successful_experiments.items():
+        if data['variant'] == 'original':
+            baseline_loss = data['final_loss']
+            break
+
+    if baseline_loss is not None:
+        print(f"\n📈 Performance vs Baseline (Original):")
+        for exp_name, data in sorted_experiments:
+            if data['variant'] != 'original':
+                improvement = baseline_loss - data['final_loss']
+                pct_change = (improvement / baseline_loss) * 100
+                symbol = "📈" if pct_change > 0 else "📉"
+                print(".4f"
+    # Failed experiments
+    failed_experiments = {k: v for k, v in results.items() if v['status'] == 'failed'}
+    if failed_experiments:
+        print(f"\n❌ Failed Experiments ({len(failed_experiments)}):")
+        for exp_name, data in failed_experiments.items():
+            print(f"  • {exp_name}: {data.get('error', 'Unknown error')}")
+
 if __name__ == "__main__":
     # Check system
     print(f"🔍 Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
@@ -710,26 +917,26 @@ if __name__ == "__main__":
 
     print(f"📊 Dataset: {len(train_dataset)} train, {len(val_dataset)} val samples")
 
-    # Train MoE model
+    # Run Newton-Schulz ablation experiments
     print(f"\n{'='*60}")
-    print(f"🧪 TRAINING: Mixture of Experts Model")
+    print(f"🧪 NEWTON-SCHULZ FORMULA ABLATION EXPERIMENTS")
     print(f"{'='*60}")
 
     print(f"\n📋 MoE Model Configuration:")
     print(f"   Architecture: {config.d_model}d, {config.n_layers}L, {config.n_heads}H, {config.d_ff}ff")
     print(f"   MoE: {config.num_experts} experts, top-{config.expert_top_k} routing")
-    print(f"   Training: {config.max_steps} steps, batch size {config.batch_size}")
+    print(f"   Training: 500 steps per experiment, batch size {config.batch_size}")
     print(f"   Data: {config.max_tokens:,} tokens, seq_len {config.max_seq_len}")
+    print(f"   Experiments: 11 different NS formula variations")
 
-    # Train model
+    # Run all ablation experiments
     start_time = time.time()
-    model, final_metrics = train_moe_model(config, train_loader, val_loader)
+    results = run_ns_ablation_experiments(config, train_loader, val_loader)
     total_time = time.time() - start_time
 
-    print(f"\n🎯 MoE Model Results:")
-    print(f"⏱️ Training time: {total_time/60:.1f} minutes")
-    print(f"🏆 Final Results:")
-    print(f"   Validation Loss: {final_metrics['val_loss']:.4f}")
-    print(f"   Validation Accuracy: {final_metrics['val_accuracy']:.4f}")
-    print(f"   Validation Perplexity: {final_metrics['val_perplexity']:.2f}")
+    print(f"\n🎯 Ablation Experiments Complete:")
+    print(f"⏱️ Total time: {total_time/60:.1f} minutes")
+    print(f"📊 Experiments run: {len(results)}")
+    print(f"✅ Successful: {sum(1 for r in results.values() if r['status'] == 'success')}")
+    print(f"❌ Failed: {sum(1 for r in results.values() if r['status'] == 'failed')}")
     print(f"{'='*60}")
